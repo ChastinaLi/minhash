@@ -1,153 +1,65 @@
 package minhash
 
-import "math"
+import (
+	"bytes"
+	"encoding/binary"
+)
 
-// MinWise is a collection of minimum hashes for a set
-type MinWise struct {
-	minimums []uint64
-	h1       Hash64
-	h2       Hash64
+var mask32 = uint32(0xffffffff)
+
+func rotl(x, r uint32) uint32 {
+	return ((x << r) | (x >> (32 - r))) & mask32
 }
 
-type Hash64 func([]byte) uint64
-
-// NewMinWise returns a new MinWise Hashsing implementation
-func NewMinWise(h1, h2 Hash64, size int) *MinWise {
-
-	minimums := make([]uint64, size)
-	for i := range minimums {
-		minimums[i] = math.MaxUint64
-	}
-
-	return &MinWise{
-		h1:       h1,
-		h2:       h2,
-		minimums: minimums,
-	}
+func mmix(h uint32) uint32 {
+	h &= mask32
+	h ^= h >> 16
+	h = (h * 0x85ebca6b) & mask32
+	h ^= h >> 13
+	h = (h * 0xc2b2ae35) & mask32
+	return h ^ (h >> 16)
 }
 
-// Push adds an element to the set.
-func (m *MinWise) Push(b []byte) {
-
-	v1 := m.h1(b)
-	v2 := m.h2(b)
-
-	for i, v := range m.minimums {
-		hv := v1 + uint64(i)*v2
-		if hv < v {
-			m.minimums[i] = hv
-		}
-	}
-}
-
-// Merge combines the signatures of the second set, creating the signature of their union.
-func (m *MinWise) Merge(m2 *MinWise) {
-
-	for i, v := range m2.minimums {
-
-		if v < m.minimums[i] {
-			m.minimums[i] = v
-		}
-	}
-}
-
-// Cardinality estimates the cardinality of the set
-func (m *MinWise) Cardinality() int {
-
-	// http://www.cohenwang.com/edith/Papers/tcest.pdf
-
-	sum := 0.0
-
-	for _, v := range m.minimums {
-		sum += -math.Log(float64(math.MaxUint64-v) / float64(math.MaxUint64))
+func Murmurhash3_32(key string, seed uint32) uint32 {
+	var h1 uint32 = seed
+	var k uint32
+	var c1, c2 uint32 = 0xcc9e2d51, 0x1b873593
+	buffer := bytes.NewBufferString(key)
+	keyBytes := []byte(key)
+	length := buffer.Len()
+	if length == 0 {
+		return 0
 	}
 
-	return int(float64(len(m.minimums)-1) / sum)
-}
+	nblocks := length / 4
+	for i := 0; i < nblocks; i++ {
+		binary.Read(buffer, binary.LittleEndian, &k)
+		k *= c1
+		k = rotl(k, 15)
+		k *= c2
 
-// Signature returns a signature for the set.
-func (m *MinWise) Signature() []uint64 {
-	return m.minimums
-}
-
-// Similarity computes an estimate for the similarity between the two sets.
-func (m *MinWise) Similarity(m2 *MinWise) float64 {
-
-	if len(m.minimums) != len(m2.minimums) {
-		panic("minhash minimums size mismatch")
+		h1 ^= k
+		h1 = rotl(h1, 13)
+		h1 = h1*5 + 0xe6546b64
 	}
 
-	intersect := 0
-
-	for i := range m.minimums {
-		if m.minimums[i] == m2.minimums[i] {
-			intersect++
-		}
+	var k1 uint32 = 0
+	tail := nblocks * 4
+	switch length & 3 {
+	case 3:
+		k1 ^= uint32(keyBytes[tail+2]) << 16
+		fallthrough
+	case 2:
+		k1 ^= uint32(keyBytes[tail+1]) << 8
+		fallthrough
+	case 1:
+		k1 ^= uint32(keyBytes[tail])
+		k1 *= c1
+		k1 = rotl(k1, 15)
+		k1 *= c2
+		h1 ^= k1
 	}
-
-	return float64(intersect) / float64(len(m.minimums))
-}
-
-// SignatureBbit returns a b-bit reduction of the signature.  This will result in unused bits at the high-end of the words if b does not divide 64 evenly.
-func (m *MinWise) SignatureBbit(b uint) []uint64 {
-
-	var sig []uint64 // full signature
-	var w uint64     // current word
-	bits := uint(64) // bits free in current word
-
-	mask := uint64(1<<b) - 1
-
-	for _, v := range m.minimums {
-		if bits >= b {
-			w <<= b
-			w |= v & mask
-			bits -= b
-		} else {
-			sig = append(sig, w)
-			w = 0
-			bits = 64
-		}
-	}
-
-	if bits != 64 {
-		sig = append(sig, w)
-	}
-
-	return sig
-}
-
-// SimilarityBbit computes an estimate for the similarity between two b-bit signatures
-func SimilarityBbit(sig1, sig2 []uint64, b uint) float64 {
-
-	if len(sig1) != len(sig2) {
-		panic("signature size mismatch")
-	}
-
-	intersect := 0
-	count := 0
-
-	mask := uint64(1<<b) - 1
-
-	for i := range sig1 {
-		w1 := sig1[i]
-		w2 := sig2[i]
-
-		bits := uint(64)
-
-		for bits >= b {
-			v1 := (w1 & mask)
-			v2 := (w2 & mask)
-
-			count++
-			if v1 == v2 {
-				intersect++
-			}
-
-			bits -= b
-			w1 >>= b
-			w2 >>= b
-		}
-	}
-
-	return float64(intersect) / float64(count)
+	// finalize
+	h1 ^= uint32(length)
+	return mmix(h1)
 }
